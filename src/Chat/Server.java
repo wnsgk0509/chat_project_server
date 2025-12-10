@@ -102,28 +102,65 @@ public class Server {
         }
         //=======로그인 처리======
         private boolean handleLogin(JSONObject json) {
-            String id = json.optString("id");	//id와pw의 값을 저장하고
+            String id = json.optString("id");
             String pw = json.optString("pw");
 
-            //유효성 검사
-            if (!accounts.containsKey(id)) {	//회원계정에 id 가 없으면 반환
+            System.out.println("[Login Debug] 시도 ID: " + id); // 로그 1
+
+            if (!accounts.containsKey(id)) {
                 sendJsonError("INVALID_CREDENTIALS", "This ID is not registered.", "LOGIN");
                 return false;
             }
 
-            UserAccount account = accounts.get(id);	
+            UserAccount account = accounts.get(id); 
             
-            if (!account.getPw().equals(pw)) {	//비밀번호가 일치하지 않으면
+            if (!account.getPw().equals(pw)) {
                 sendJsonError("INVALID_CREDENTIALS", "The password does not exist.", "LOGIN");
                 return false;
             }
 
+            // 접속자 객체 생성
+            this.user = new ConnectedUser(account.getName(), account.getId(), out, socket);
+            connectedUsers.add(this.user); 
             
-            // 접속자 명단에 등록
-            user = new ConnectedUser(account.getName(), account.getId(), out, socket);
-            connectedUsers.add(user);
+            System.out.println("[Login Debug] 접속자 객체 생성 완료: " + account.getName()); // 로그 2
 
-            // 로그인 성공
+            // =========================================================================
+            // [문제 추적] 오프라인 방 복구 로직
+            // =========================================================================
+            
+            Set<String> myRooms = account.getJoinedRooms();
+            
+            // 로그 3: 내가 속한 방 개수 확인
+            if (myRooms == null) {
+                System.out.println("[Login Debug] 방 목록(Set)이 NULL 입니다! (UserAccount 코드 확인 필요)");
+            } else {
+                System.out.println("[Login Debug] 복구할 방 개수: " + myRooms.size() + "개 -> " + myRooms.toString());
+                
+                for (String roomName : myRooms) {
+                    // 메모리에 있는 실시간 방 리스트 가져오기
+                    List<ConnectedUser> activeRoomUsers = rooms.get(roomName);
+                    
+                    // 로그 4: 해당 방의 실시간 상태 확인
+                    if (activeRoomUsers == null) {
+                        System.out.println("[Login Debug] 방(" + roomName + ")이 메모리에 없어 새로 생성합니다.");
+                        activeRoomUsers = new CopyOnWriteArrayList<>();
+                        rooms.put(roomName, activeRoomUsers);
+                    } else {
+                        System.out.println("[Login Debug] 방(" + roomName + ") 발견! 현재 접속자 수: " + activeRoomUsers.size());
+                    }
+                    
+                    // 소켓 추가
+                    if (!activeRoomUsers.contains(this.user)) {
+                        activeRoomUsers.add(this.user);
+                        System.out.println("[Login Debug] ★ 성공! " + account.getId() + "님을 " + roomName + " 실시간 리스트에 추가함.");
+                    } else {
+                        System.out.println("[Login Debug] 이미 리스트에 존재함.");
+                    }
+                }
+            }
+            // =========================================================================
+
             JSONObject jsonRespone = new JSONObject();
             jsonRespone.put("status", "OK");
             jsonRespone.put("message", "Login Success");
@@ -263,89 +300,116 @@ public class Server {
             json.put("command", "USER_LIST");
             json.put("room", roomName);
 
-            // 방 멤버 가져오기.
-            List<ConnectedUser> roomUsers = rooms.get(roomName);
-
-            JSONArray arr = new JSONArray();
-
-            // 방이 존재하고 멤버가 있다면 이름 담기
-            if (roomUsers != null) {
-                for (ConnectedUser u : roomUsers) {
-                    arr.put(u.getUserName());
+            JSONArray usersArr = new JSONArray();
+            int totalCount = 0;
+            
+            //  전체 계정(accounts)을 전수 조사하여 오프라인 멤버도 포함
+            for (UserAccount account : accounts.values()) {
+                // 계정 정보에 "이 방에있으면 카운트
+                if (account.isInRoom(roomName)) {
+                    usersArr.put(account.getName()); // 접속 여부 상관없이 추가
+                    totalCount++;
                 }
             }
          
 
             // 결과 전송
-            json.put("users", arr);
-            json.put("userCount", arr.length()); // 배열 길이로 자동 계산
+            json.put("users", usersArr);
+            json.put("userCount", totalCount); // 배열 길이로 자동 계산
 
             sendJson(json); 
         }
         
         // ===== 방 초대 =====
-        private void invite(String roomName, String inviteUserName) {	
-            // 사용자가 해당 roomName에 속해있는지 확인
-        	UserAccount myAccount = getMyAccount(); 
+        private void invite(String roomName, String targetUserId) {  
+            
+            // 1. 기본 검증 (나, 방 존재 여부 등)
+            UserAccount myAccount = getMyAccount(); 
             if (myAccount == null || !myAccount.isInRoom(roomName)) {
                 sendJsonError("NOT_IN_ROOM", "You are not in this room.", "INVITE");
                 return;
             }
 
-            
-            ConnectedUser invited = connectedUsers.stream()	// (모든 사용자 중에서) 초대하려는 사용자를 저장
-                    .filter(u -> u.getUserName().equals(inviteUserName))	//u는 모든 사용자,
-                    .findFirst()	//첫 번째로 찾은값 확인
-                    .orElse(null);	//못 찾았으면 null
-
-            if (invited == null) {
-                sendJsonError("USER_NOT_FOUND", "User not found.", "INVITE");
-                return;
-            }
-
-            if (inviteUserName.equals(user.getUserName())) {
+            if (targetUserId.equals(user.getUserId())) { // 내 ID와 비교
                 sendJsonError("SELF_INVITE", "Cannot invite yourself.", "INVITE");
                 return;
             }
 
-            List<ConnectedUser> roomUsers  = rooms.get(roomName);
-            if (roomUsers  != null && roomUsers .contains(invited)) {
+            // 2. 계정(Account) 찾기 및 방 추가 (영구 저장)
+            UserAccount invitedAccount = accounts.get(targetUserId);
+            
+            if (invitedAccount == null) {
+                // 오프라인 유저를 위한 임시 계정 생성 (ID 기반)
+                invitedAccount = new UserAccount(targetUserId, targetUserId, "unknown");
+                accounts.put(targetUserId, invitedAccount);
+            } 
+
+            if (invitedAccount.isInRoom(roomName)) {
                 sendJsonError("ALREADY_IN_ROOM", "User already in room.", "INVITE");
                 return;
             }
-
-            // 초대된 유저 데이터에 방 추가
-            UserAccount invitedAccount = accounts.get(inviteUserName);
-            if (invitedAccount != null) {
-                invitedAccount.addRoom(roomName); // ★ 여기에 저장해야 나중에 로그인해도 방이 유지됨
-            }
             
-            // 초대받은 사용자에게 개별 알림
-            JSONObject jsonInvite = new JSONObject();
-          	jsonInvite.put("status", "INFO");
-          	jsonInvite.put("message", "You have been invited to '" + roomName + "'");
-          	jsonInvite.put("command", "INVITE");
-          	jsonInvite.put("username", user.getUserName());
-          	jsonInvite.put("room", roomName);
-          	sendJsonToUser(invited, jsonInvite);
+            invitedAccount.addRoom(roomName); // ★ 계정에 저장 (재접속 시 유지용)
 
-            // 방 전체에 NOTICE (알림용)
+
+            // =================================================================
+            // [해결 1] 접속자 찾기 로직 강화 (ID로 비교하되, ConnectedUser가 ID를 잘 들고 있어야 함)
+            // =================================================================
+            ConnectedUser invitedConnectedUser = connectedUsers.stream()
+                    .filter(u -> {
+                        // u.getUserId()가 있으면 그걸로 비교하고, 없으면 이름으로라도 비교 시도
+                        String uID = u.getUserId();     // ConnectedUser에 이 메서드가 있어야 함!
+                        String uName = u.getUserName();
+                        return targetUserId.equals(uID) || targetUserId.equals(uName);
+                    })
+                    .findFirst()
+                    .orElse(null);
+
+
+            // [해결 2] 접속 중이라면 '실시간 처리'를 반드시 해줘야 함
+            if (invitedConnectedUser != null) {
+                
+                // A. 배너 알림 전송 (즉시 배너 생성됨)
+                JSONObject jsonInvite = new JSONObject();
+                jsonInvite.put("status", "INFO");
+                jsonInvite.put("command", "INVITE");
+                jsonInvite.put("message", user.getUserName() + " invited you.");
+                jsonInvite.put("username", user.getUserName());
+                jsonInvite.put("room", roomName);
+                
+                sendJsonToUser(invitedConnectedUser, jsonInvite);
+
+                // B. ★★★ [채팅 안 보이는 문제 해결] ★★★
+                // 초대된 사람의 소켓을 '현재 방의 활성 멤버 리스트'에 즉시 추가해야 함!
+                List<ConnectedUser> currentRoomUsers = rooms.get(roomName);
+                
+                // 방이 메모리에 없으면 생성 (혹시 모를 에러 방지)
+                if (currentRoomUsers == null) {
+                    currentRoomUsers = new CopyOnWriteArrayList<>();
+                    rooms.put(roomName, currentRoomUsers);
+                }
+
+                // 리스트에 없으면 추가 (이제 이 사람한테도 채팅이 전송됨)
+                if (!currentRoomUsers.contains(invitedConnectedUser)) {
+                    currentRoomUsers.add(invitedConnectedUser);
+                    System.out.println("[System] " + targetUserId + " added to active room list: " + roomName);
+                }
+            }
+
+            // 3. 방 전체에 알림 메시지 (로그용)
             JSONObject notice = new JSONObject();
             notice.put("command", "CHAT");
             notice.put("status", "INFO");
             notice.put("room", roomName);
-            notice.put("message", user.getUserName() + " invited " + inviteUserName);
             
-            // 대화 기록에 시스템 알림 저장
-            roomMessages.get(roomName).add(notice.toString());
+            String targetName = invitedAccount.getName(); 
+            notice.put("message", user.getUserName() + " invited " + targetName);
+            
+            if (roomMessages.containsKey(roomName)) {
+                roomMessages.get(roomName).add(notice.toString());
+            }
             
             sendJsonToRoom(roomName, notice);
-            
-            if (roomUsers  != null) {
-            	roomUsers .add(invited);	//방목록에도 초대된 유저 추가
-            }
-          
-
         }
         
         // ===== 초대 가능한 유저 리스트 반환 (전체 가입자 기준) =====
@@ -369,6 +433,7 @@ public class Server {
             // '접속자(connectedUsers)'가 아니라 '전체 가입자(accounts)'를 순회합니다.
             for (UserAccount account : accounts.values()) {
                 String targetName = account.getName();
+                String targetId   = account.getId();
 
                 // 나 자신은 초대 목록에서 제거
                 if (targetName.equals(user.getUserName())) {
@@ -381,7 +446,11 @@ public class Server {
                 }
 
                 // 초대 가능한 사람만 추가
-                arr.put(targetName);
+                JSONObject userObj = new JSONObject();
+                userObj.put("id", targetId);     
+                userObj.put("name", targetName); 
+                
+                arr.put(userObj);
             }
 
             json.put("users", arr);
