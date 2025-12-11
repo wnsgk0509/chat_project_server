@@ -105,8 +105,6 @@ public class Server {
             String id = json.optString("id");
             String pw = json.optString("pw");
 
-            System.out.println("[Login Debug] 시도 ID: " + id); // 로그 1
-
             if (!accounts.containsKey(id)) {
                 sendJsonError("INVALID_CREDENTIALS", "This ID is not registered.", "LOGIN");
                 return false;
@@ -122,40 +120,30 @@ public class Server {
             // 접속자 객체 생성
             this.user = new ConnectedUser(account.getName(), account.getId(), out, socket);
             connectedUsers.add(this.user); 
-            
-            System.out.println("[Login Debug] 접속자 객체 생성 완료: " + account.getName()); // 로그 2
+
 
             // =========================================================================
-            // [문제 추적] 오프라인 방 복구 로직
+            // 오프라인 방 복구 로직
             // =========================================================================
             
             Set<String> myRooms = account.getJoinedRooms();
-            
-            // 로그 3: 내가 속한 방 개수 확인
-            if (myRooms == null) {
-                System.out.println("[Login Debug] 방 목록(Set)이 NULL 입니다! (UserAccount 코드 확인 필요)");
-            } else {
-                System.out.println("[Login Debug] 복구할 방 개수: " + myRooms.size() + "개 -> " + myRooms.toString());
-                
+
+            // 방 목록이 존재할 때만 실행
+            if (myRooms != null) {
                 for (String roomName : myRooms) {
-                    // 메모리에 있는 실시간 방 리스트 가져오기
-                    List<ConnectedUser> activeRoomUsers = rooms.get(roomName);
                     
-                    // 로그 4: 해당 방의 실시간 상태 확인
+                    // 1. 메모리에 있는 실시간 방 리스트 가져오기
+                    List<ConnectedUser> activeRoomUsers = rooms.get(roomName);
+
+                    // 2. 방이 메모리에 없으면(서버 재시작 등) 새로 생성하여 복구
                     if (activeRoomUsers == null) {
-                        System.out.println("[Login Debug] 방(" + roomName + ")이 메모리에 없어 새로 생성합니다.");
                         activeRoomUsers = new CopyOnWriteArrayList<>();
                         rooms.put(roomName, activeRoomUsers);
-                    } else {
-                        System.out.println("[Login Debug] 방(" + roomName + ") 발견! 현재 접속자 수: " + activeRoomUsers.size());
                     }
-                    
-                    // 소켓 추가
+
+                    // 3. 내 소켓 객체(this.user)를 실시간 리스트에 주입 (Context Injection)
                     if (!activeRoomUsers.contains(this.user)) {
                         activeRoomUsers.add(this.user);
-                        System.out.println("[Login Debug] ★ 성공! " + account.getId() + "님을 " + roomName + " 실시간 리스트에 추가함.");
-                    } else {
-                        System.out.println("[Login Debug] 이미 리스트에 존재함.");
                     }
                 }
             }
@@ -349,11 +337,11 @@ public class Server {
                 return;
             }
             
-            invitedAccount.addRoom(roomName); // ★ 계정에 저장 (재접속 시 유지용)
+            invitedAccount.addRoom(roomName); // 계정에 저장 (재접속 시 유지용)
 
 
             // =================================================================
-            // [해결 1] 접속자 찾기 로직 강화 (ID로 비교하되, ConnectedUser가 ID를 잘 들고 있어야 함)
+            //  접속자 찾기 로직 강화 (ID로 비교)
             // =================================================================
             ConnectedUser invitedConnectedUser = connectedUsers.stream()
                     .filter(u -> {
@@ -366,7 +354,7 @@ public class Server {
                     .orElse(null);
 
 
-            // [해결 2] 접속 중이라면 '실시간 처리'를 반드시 해줘야 함
+            // 접속 중이라면 '실시간 처리'를 반드시 해줘야 함
             if (invitedConnectedUser != null) {
                 
                 // A. 배너 알림 전송 (즉시 배너 생성됨)
@@ -379,8 +367,7 @@ public class Server {
                 
                 sendJsonToUser(invitedConnectedUser, jsonInvite);
 
-                // B. ★★★ [채팅 안 보이는 문제 해결] ★★★
-                // 초대된 사람의 소켓을 '현재 방의 활성 멤버 리스트'에 즉시 추가해야 함!
+                // 초대된 사람의 소켓을 '현재 방의 활성 멤버 리스트'에 즉시 추가
                 List<ConnectedUser> currentRoomUsers = rooms.get(roomName);
                 
                 // 방이 메모리에 없으면 생성 (혹시 모를 에러 방지)
