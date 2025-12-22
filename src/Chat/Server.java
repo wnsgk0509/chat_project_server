@@ -1,8 +1,18 @@
 package Chat;
 
-import java.io.*;
-import java.net.*;
-import java.util.*;
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.io.PrintWriter;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.json.JSONArray;
@@ -21,11 +31,11 @@ public class Server {
 
 
     public static void main(String[] args) {
-    	
-    	accounts.put("test1" , new UserAccount("user1" , "test1", "test1"));
-    	accounts.put("test2" , new UserAccount("user2" , "test2", "test2"));
-    	accounts.put("test3" , new UserAccount("user3" , "test3", "test3"));
-    	accounts.put("test4" , new UserAccount("user4" , "test4", "test4"));
+//    	
+//    	accounts.put("test1" , new UserAccount("user1" , "test1", "test1"));
+//    	accounts.put("test2" , new UserAccount("user2" , "test2", "test2"));
+//    	accounts.put("test3" , new UserAccount("user3" , "test3", "test3"));
+//    	accounts.put("test4" , new UserAccount("user4" , "test4", "test4"));
     	
     	
         try (ServerSocket serverSocket = new ServerSocket(8000)) {		//포트번호 8000번으로 생성
@@ -84,7 +94,7 @@ public class Server {
                 	return;	
                 }
 
-                // ===== 채팅/방 명령 처리 =====
+                // ===== 명령 처리 =====
                
                 while ((msg = in.readLine()) != null) {
                     JSONObject json = new JSONObject(msg);	//데이터를 객체로 변환 후 저장
@@ -105,12 +115,15 @@ public class Server {
             String id = json.optString("id");
             String pw = json.optString("pw");
 
+            UserDAO dao = new UserDAO();
+            UserAccount account = dao.login(id, pw);
+            
             if (!accounts.containsKey(id)) {
                 sendJsonError("INVALID_CREDENTIALS", "This ID is not registered.", "LOGIN");
                 return false;
             }
 
-            UserAccount account = accounts.get(id); 
+            accounts.put(account.getId(), account);
             
             if (!account.getPw().equals(pw)) {
                 sendJsonError("INVALID_CREDENTIALS", "The password does not exist.", "LOGIN");
@@ -281,7 +294,7 @@ public class Server {
         }
         //===========================================
         
-        // ===== 접속 유저 수, 이름 목록 전송 =====
+        // ===== 방 유저 수, 이름 목록 전송 =====
         // [현재 방 참여자 목록 전송]
         private void sendUserList(String roomName) {
             JSONObject json = new JSONObject();
@@ -327,11 +340,21 @@ public class Server {
             UserAccount invitedAccount = accounts.get(targetUserId);
             
             if (invitedAccount == null) {
-                // 오프라인 유저를 위한 임시 계정 생성 (ID 기반)
-                invitedAccount = new UserAccount(targetUserId, targetUserId, "unknown");
-                accounts.put(targetUserId, invitedAccount);
-            } 
+                UserDAO dao = new UserDAO();
+                invitedAccount = dao.findUserById(targetUserId);
+                
+                // DB에서 찾았으면 메모리에 임시로 올려둡니다. (그래야 방 목록을 저장하니까요)
+                if (invitedAccount != null) {
+                    accounts.put(targetUserId, invitedAccount);
+                }
+            }
 
+        	// DB에도 없으면 진짜 없는 유저입니다.
+            if (invitedAccount == null) {
+                sendJsonError("USER_NOT_FOUND", "User does not exist.", "INVITE");
+                return;
+            }
+            
             if (invitedAccount.isInRoom(roomName)) {
                 sendJsonError("ALREADY_IN_ROOM", "User already in room.", "INVITE");
                 return;
@@ -341,7 +364,7 @@ public class Server {
 
 
             // =================================================================
-            //  접속자 찾기 로직 강화 (ID로 비교)
+            //  실시간 접속자 찾기 로직 (ID로 비교)
             // =================================================================
             ConnectedUser invitedConnectedUser = connectedUsers.stream()
                     .filter(u -> {
@@ -417,7 +440,7 @@ public class Server {
 
             JSONArray arr = new JSONArray();
 
-            // '접속자(connectedUsers)'가 아니라 '전체 가입자(accounts)'를 순회합니다.
+            // '접속자(connectedUsers)'가 아니라 '전체 가입자(accounts)'를 순회
             for (UserAccount account : accounts.values()) {
                 String targetName = account.getName();
                 String targetId   = account.getId();
@@ -545,7 +568,7 @@ public class Server {
             sendJson(json);
         }
         
-        // ===== 전원종료 =====
+        // ===== 종료 =====
         private void off() {
             // 접속자 목록(connectedUsers)에서 제거
             connectedUsers.remove(user); 
@@ -581,7 +604,7 @@ public class Server {
             sendJsonToRoom(roomName, json);
         }
 
-        //로그인 성공 및 에러 메시지 응답 (개별적인)
+        //개별적인 메시지 응답 
         private void sendJson(JSONObject json) {
         	//로그
         	System.out.println("=== 서버에서 보내는 JSON ===");
